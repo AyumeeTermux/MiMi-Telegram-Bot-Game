@@ -1,0 +1,7 @@
+{
+  "name": "MiMi Games RPG by oWo",
+  "description": "A comprehensive text-based RPG simulation and management dashboard inspired by Telegram RPG bots, featuring combat, gacha, pets, and random events.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
