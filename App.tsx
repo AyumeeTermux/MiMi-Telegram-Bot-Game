@@ -6,14 +6,24 @@ import { createNewPlayer, getPlayerTotalStats, handleLevelUp, rollGacha, checkRa
 
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
 
-interface TelegramUpdate {
-  update_id: number;
-  message?: {
-    chat: { id: number; first_name?: string; username?: string };
-    text?: string;
-    from: { id: number; first_name: string; username?: string };
-  };
-}
+// Defined Keyboards for Telegram
+const KEYBOARD_MAIN = {
+  keyboard: [
+    [{ text: "👤 Profile" }, { text: "⚔️ Hunt" }],
+    [{ text: "🎒 Inventory" }, { text: "🛒 Shop" }],
+    [{ text: "🏆 Leaderboard" }, { text: "❓ Help" }]
+  ],
+  resize_keyboard: true
+};
+
+const KEYBOARD_SHOP = {
+  keyboard: [
+    [{ text: "⚔️ Katana (1200)" }, { text: "🔱 Spear (2500)" }],
+    [{ text: "🛡️ Armor (1800)" }, { text: "🎰 Gacha (500)" }],
+    [{ text: "🌟 VIP (10000)" }, { text: "🔙 Kembali" }]
+  ],
+  resize_keyboard: true
+};
 
 const App: React.FC = () => {
   const [token, setToken] = useState<string>('');
@@ -24,7 +34,6 @@ const App: React.FC = () => {
   const [offset, setOffset] = useState<number>(0);
   const [isPolling, setIsPolling] = useState<boolean>(false);
   
-  // Load players from local storage on mount
   useEffect(() => {
     const saved = localStorage.getItem('mimi_players_db');
     if (saved) {
@@ -36,74 +45,122 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Save players whenever they change
   useEffect(() => {
     localStorage.setItem('mimi_players_db', JSON.stringify(players));
   }, [players]);
 
   const addLog = (type: 'in' | 'out' | 'sys', text: string, user: string = "System") => {
     const newLog = { id: Math.random().toString(), type, text, user, time: new Date() };
-    setLogs(prev => [newLog, ...prev].slice(0, 100)); // Keep last 100 logs
+    setLogs(prev => [newLog, ...prev].slice(0, 100));
   };
 
-  const sendMessage = async (chatId: number, text: string) => {
+  /**
+   * Enhanced wrapInBox with fixed-width alignment for a professional "Table" look
+   */
+  const wrapInBox = (title: string, content: string): string => {
+    const BOX_WIDTH = 22; // Inner content space
+    const borderTop = "═".repeat(BOX_WIDTH + 2);
+    const separator = "═".repeat(BOX_WIDTH + 2);
+    
+    // Function to calculate visual length (handling some common emoji quirks in monospace)
+    const getVisualLength = (str: string) => {
+      // Very basic approximation: emojis often take 2 spaces in monospace
+      // This is not perfect as different clients/fonts vary, but helps alignment.
+      const emojiMatch = str.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]|\u200D|\uFE0F/g);
+      return str.length + (emojiMatch ? emojiMatch.length : 0);
+    };
+
+    const padLine = (text: string) => {
+      const len = getVisualLength(text);
+      const padding = Math.max(0, BOX_WIDTH - len);
+      return text + " ".repeat(padding);
+    };
+
+    const lines = content.split('\n');
+    let boxed = `\`\`\`\n`;
+    boxed += `╔${borderTop}╗\n`;
+    boxed += `║ ${padLine(title.toUpperCase())} ║\n`;
+    boxed += `╠${separator}╣\n`;
+    
+    lines.forEach(line => {
+      // Split long lines or just pad them
+      const text = line.trim();
+      if (text === "") {
+        boxed += `║ ${" ".repeat(BOX_WIDTH)} ║\n`;
+      } else {
+        boxed += `║ ${padLine(text)} ║\n`;
+      }
+    });
+    
+    boxed += `╚${borderTop}╝\n`;
+    boxed += `\`\`\``;
+    return boxed;
+  };
+
+  const sendMessage = async (chatId: number, title: string, content: string, keyboard: any = KEYBOARD_MAIN) => {
+    const formattedText = wrapInBox(title, content);
     try {
       await fetch(`${TELEGRAM_API_BASE}${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'Markdown' })
+        body: JSON.stringify({ 
+          chat_id: chatId, 
+          text: formattedText, 
+          parse_mode: 'MarkdownV2',
+          reply_markup: keyboard
+        })
       });
-      addLog('out', text, `Chat ID: ${chatId}`);
+      addLog('out', `[${title}] ${content}`, `Chat ID: ${chatId}`);
     } catch (error) {
       addLog('sys', `Error sending message: ${error}`);
     }
   };
 
-  const processCommand = (chatId: number, username: string, text: string) => {
+  const processCommand = (chatId: number, username: string, rawText: string) => {
     const userId = chatId.toString();
     let player = players[userId];
+    const text = rawText.trim();
 
-    const cmd = text.toLowerCase().trim();
-    const [command, ...args] = cmd.split(' ');
-    const arg = args.join(' ');
+    // Map button text to internal commands
+    let cmd = text.toLowerCase();
+    if (text === "👤 Profile") cmd = "/profile";
+    if (text === "⚔️ Hunt") cmd = "/hunt";
+    if (text === "🎒 Inventory") cmd = "/inv";
+    if (text === "🛒 Shop") cmd = "/shop";
+    if (text === "🏆 Leaderboard") cmd = "/leaderboard";
+    if (text === "❓ Help") cmd = "/help";
+    if (text === "🔙 Kembali") cmd = "/start";
+    
+    if (text.includes("Katana")) cmd = "/buy_katana";
+    if (text.includes("Spear")) cmd = "/buy_spear";
+    if (text.includes("Armor")) cmd = "/buy_armor";
+    if (text.includes("Gacha")) cmd = "/buy_gacha";
+    if (text.includes("VIP")) cmd = "/buy_vip";
+
+    const [command] = cmd.split(' ');
 
     if (command === '/start') {
       if (!player) {
-        // Simple class selection logic for real bot: 
-        // In a real bot we'd send buttons (ReplyKeyboardMarkup), 
-        // but for this implementation we'll auto-assign or wait for next cmd.
         const newP = createNewPlayer(username, 'Warrior');
         setPlayers(prev => ({ ...prev, [userId]: newP }));
-        sendMessage(chatId, `🎮 *Selamat Datang di MiMi Games RPG!*\n\nKaraktermu telah dibuat sebagai *Warrior*.\n\n📜 *Daftar Perintah:*\n/profile - Cek status\n/hunt - Lawan monster\n/inv - Cek inventory\n/shop - Toko item\n/heal - Pulihkan HP\n/help - Bantuan lengkap`);
-        return;
+        sendMessage(chatId, "🎮 Welcome", "Selamat Datang di\nMiMi Games RPG!\n\nKarakter: Warrior\n\nKlik menu di bawah\nuntuk memulai!", KEYBOARD_MAIN);
       } else {
-        sendMessage(chatId, `Selamat datang kembali, *${player.username}*! Siap berpetualang lagi?`);
-        return;
+        sendMessage(chatId, "🏠 Main Menu", `Halo ${player.username}!\nLevel: ${player.level}\nCoins: ${player.coins}\n\nSiap berburu hari ini?`, KEYBOARD_MAIN);
       }
-    }
-
-    if (!player) {
-      sendMessage(chatId, "Ketik /start untuk memulai petualangan!");
       return;
     }
 
-    // Clone player to update
+    if (!player) {
+      sendMessage(chatId, "⚠️ System", "Gunakan /start\nterlebih dahulu!", KEYBOARD_MAIN);
+      return;
+    }
+
     let up = { ...player };
-    let responseText = "";
 
     if (command === '/profile' || command === '/me') {
       const stats = getPlayerTotalStats(up);
-      responseText = `👤 *PROFILE: ${up.username}* [${up.playerClass}]\n\n` +
-        `Level: ${up.level} (${up.xp}/${up.level * 100} XP)\n` +
-        `Rank: 🏅 ${up.rank}\n` +
-        `HP: ❤️ ${up.hp}/${stats.hp}\n` +
-        `Coins: 💰 ${up.coins}\n` +
-        `Damage: ⚔️ ${stats.damage}\n` +
-        `Crit: 💥 ${stats.crit}%\n\n` +
-        `Weapon: ${up.equippedWeapon || 'None'}\n` +
-        `Armor: ${up.equippedArmor || 'None'}\n` +
-        `Pet Active: ${up.activePet || 'None'}\n` +
-        `VIP: ${up.vip ? '🌟 YES' : 'NO'}`;
+      const content = `👤 User : ${up.username}\n🌟 Lvl  : ${up.level}\n✨ XP   : ${up.xp}/${up.level * 100}\n💰 Coin : ${up.coins}\n❤️ HP   : ${up.hp}/${stats.hp}\n⚔️ Dmg  : ${stats.damage}\n💥 Crit : ${stats.crit}%\n\n🛡️ Rank : ${up.rank}\n🌟 VIP  : ${up.vip ? 'Active' : 'No'}`;
+      sendMessage(chatId, "📜 Profile", content, KEYBOARD_MAIN);
     } else if (command === '/hunt') {
       const availableMonsters = MONSTERS.filter(m => m.level <= up.level + 2);
       const monster = availableMonsters[Math.floor(Math.random() * availableMonsters.length)];
@@ -113,7 +170,7 @@ const App: React.FC = () => {
       
       if (up.hp <= totalDamageTaken) {
         up.hp = 10;
-        responseText = `💀 Kamu kalah melawan *${monster.name}*! HP-mu kritis, perlu istirahat. (/heal)`;
+        sendMessage(chatId, "💀 Defeat", `Kalah vs ${monster.name}\nHP sisa: ${up.hp}\n\nIstirahat dulu\natau beli potion!`, KEYBOARD_MAIN);
       } else {
         up.hp -= totalDamageTaken;
         let xpGain = monster.xp;
@@ -124,39 +181,57 @@ const App: React.FC = () => {
         }
         up.xp += xpGain;
         up.coins += coinGain;
-        responseText = `⚔️ Bertarung melawan *${monster.name}*!\nKamu menang!\n💰 +${coinGain} Coins\n✨ +${xpGain} XP\n❤️ Sisa HP: ${up.hp}`;
+        let result = `WIN vs ${monster.name}\n\n💰 +${coinGain} Coins\n✨ +${xpGain} XP\n❤️ HP: ${up.hp}`;
         const lvlMsg = handleLevelUp(up);
-        if (lvlMsg) responseText += `\n\n${lvlMsg}`;
+        if (lvlMsg) result += `\n\n🆙 LEVEL UP!`;
         const eventMsg = checkRandomEvent(up);
-        if (eventMsg) responseText += `\n\n⚠️ *EVENT:* ${eventMsg}`;
+        if (eventMsg) result += `\n\n⚠️ EVENT TERJADI!`;
+        sendMessage(chatId, "⚔️ Battle", result, KEYBOARD_MAIN);
       }
-    } else if (command === '/heal') {
-      const stats = getPlayerTotalStats(up);
-      if (up.hp >= stats.hp) {
-        responseText = "❤️ HP kamu sudah penuh!";
-      } else if (up.coins >= 50) {
-        up.coins -= 50;
-        up.hp = stats.hp;
-        responseText = "🧪 Kamu meminum ramuan penyembuh! HP Penuh! (-50 Coins)";
-      } else {
-        responseText = "💰 Coins tidak cukup untuk membeli ramuan (Butuh 50)!";
-      }
-    } else if (command === '/inv' || command === '/inventory') {
-      responseText = `🎒 *INVENTORY*\n\n${up.inventory.map((i, idx) => `${idx + 1}. ${i}`).join('\n')}\n\n💡 Ketik \`/equip [nama]\` untuk memakai.`;
     } else if (command === '/shop') {
-      responseText = `🛒 *SHOP*\n\n/buy_katana - 1200 💰\n/buy_spear - 2500 💰\n/buy_armor - 1800 💰\n/buy_gacha - 500 💰\n/buy_vip - 10000 💰`;
+      sendMessage(chatId, "🛒 MiMi Shop", `Coins: ${up.coins}\n\nPilih item hebat\nuntuk memperkuat\ndirimu!`, KEYBOARD_SHOP);
+    } else if (command === '/inv' || command === '/inventory') {
+      const invList = up.inventory.map((i, idx) => `${idx + 1}. ${i}`).join('\n');
+      sendMessage(chatId, "🎒 Bag", invList || "Tas kosong...", KEYBOARD_MAIN);
+    } else if (command.startsWith('/buy')) {
+      let price = 0;
+      let itemName = "";
+      if (command === '/buy_katana') { price = 1200; itemName = "🔥 Katana"; }
+      if (command === '/buy_spear') { price = 2500; itemName = "⚡ Spear"; }
+      if (command === '/buy_armor') { price = 1800; itemName = "🛡️ Armor"; }
+      if (command === '/buy_gacha') { price = 500; }
+      if (command === '/buy_vip') { price = 10000; }
+
+      if (up.coins >= price) {
+        if (command === '/buy_gacha') {
+          up.coins -= 500;
+          const gItem = rollGacha();
+          up.inventory.push(gItem.name);
+          sendMessage(chatId, "🎰 Gacha", `Dapat item:\n${gItem.name}\n\nRarity: ${gItem.rarity}`, KEYBOARD_SHOP);
+        } else if (command === '/buy_vip') {
+          up.coins -= 10000;
+          up.vip = true;
+          sendMessage(chatId, "🌟 VIP", "BERHASIL!\nBonus XP & Coins\nkini aktif.", KEYBOARD_SHOP);
+        } else {
+          up.coins -= price;
+          up.inventory.push(itemName);
+          sendMessage(chatId, "✅ Success", `Beli ${itemName}\nberhasil!\n\nSisa koin: ${up.coins}`, KEYBOARD_SHOP);
+        }
+      } else {
+        sendMessage(chatId, "❌ Gagal", `Coins kurang!\nButuh: ${price}`, KEYBOARD_SHOP);
+      }
     } else if (command === '/help') {
-      responseText = `📜 *COMMANDS MI-MI RPG*\n/profile - Cek status\n/hunt - Lawan monster\n/inv - Cek inventory\n/equip [nama] - Pakai item\n/shop - Toko item\n/heal - Pulihkan HP\n/buy_gacha - Gacha (500)\n/leaderboard - Papan peringkat`;
+      const help = "Bantuan Command:\n\n👤 Profile: Status\n⚔️ Hunt: Bertarung\n🎒 Bag: Item kamu\n🛒 Shop: Belanja\n🏆 Top: Peringkat\n\nMainkan setiap hari!";
+      sendMessage(chatId, "❓ Info", help, KEYBOARD_MAIN);
     } else if (command === '/leaderboard') {
-      // Fix: Cast Object.values to Player[] to avoid unknown type errors
       const sorted = (Object.values(players) as Player[]).sort((a, b) => b.level - a.level).slice(0, 5);
-      responseText = `🏆 *TOP 5 PLAYERS*\n\n` + sorted.map((p, i) => `${i+1}. ${p.username} - LV ${p.level}`).join('\n');
+      const list = sorted.map((p, i) => `${i+1}. ${p.username} (Lvl ${p.level})`).join('\n');
+      sendMessage(chatId, "🏆 Top 5", list || "Kosong", KEYBOARD_MAIN);
     } else {
-      responseText = "❓ Command tidak dikenal. Ketik /help untuk bantuan.";
+      sendMessage(chatId, "❓ Unknown", "Klik menu\ndi bawah ini!", KEYBOARD_MAIN);
     }
 
     setPlayers(prev => ({ ...prev, [userId]: up }));
-    sendMessage(chatId, responseText);
   };
 
   const pollUpdates = async () => {
@@ -191,38 +266,46 @@ const App: React.FC = () => {
 
   if (!isBotStarted) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-        <div className="bg-slate-900 border border-slate-700 p-8 rounded-2xl shadow-2xl max-w-md w-full">
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4 font-sans">
+        <div className="bg-slate-900 border border-slate-700 p-8 rounded-3xl shadow-2xl max-w-md w-full border-t-4 border-t-blue-500">
           <div className="text-center mb-8">
-            <i className="fa-brands fa-telegram text-blue-500 text-6xl mb-4 animate-bounce"></i>
-            <h1 className="text-2xl font-bold">MiMi Games RPG Bot</h1>
-            <p className="text-slate-400 mt-2">Connect your real Telegram Bot Token</p>
+            <div className="inline-block p-4 bg-blue-600/10 rounded-full mb-4">
+              <i className="fa-brands fa-telegram text-blue-500 text-6xl animate-pulse"></i>
+            </div>
+            <h1 className="text-3xl font-black tracking-tight">MiMi RPG Bot</h1>
+            <p className="text-slate-400 mt-2 font-medium">Text-Based RPG Server Dashboard</p>
           </div>
           <div className="space-y-4">
-            <input 
-              type="password" 
-              placeholder="PASTE YOUR BOT TOKEN HERE"
-              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-            />
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">Bot Token</label>
+              <input 
+                type="password" 
+                placeholder="123456789:ABCDefgh..."
+                className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-5 py-4 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm text-white transition-all"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+            </div>
             <button 
               onClick={() => {
                 if(token.includes(":")) {
                    setIsBotStarted(true);
-                   addLog('sys', "Bot engine started. Long polling active.");
+                   addLog('sys', "Bot engine initialized successfully.");
                 } else {
-                   alert("Token format invalid. Should be 12345:ABC...");
+                   alert("Format token tidak valid!");
                 }
               }}
               disabled={!token}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+              className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-black py-4 rounded-2xl transition-all flex items-center justify-center gap-3 text-lg shadow-xl shadow-blue-900/40"
             >
-              <i className="fa-solid fa-plug"></i> Connect & Start Server
+              <i className="fa-solid fa-power-off"></i> START SERVER
             </button>
-            <p className="text-[10px] text-slate-500 text-center">
-              Create a bot at <a href="https://t.me/botfather" target="_blank" className="text-blue-400 underline">@BotFather</a> on Telegram to get a token.
-            </p>
+            <div className="pt-4 border-t border-slate-800 flex justify-between items-center px-2">
+              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">v2.5 Stable</span>
+              <span className="text-[10px] text-blue-500 font-bold uppercase tracking-widest flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-ping"></span> oWo Engine
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -233,110 +316,131 @@ const App: React.FC = () => {
     <div className="flex h-screen bg-slate-950 overflow-hidden text-slate-200">
       {/* Sidebar */}
       <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden md:flex">
-        <div className="p-6 border-b border-slate-800">
-          <h2 className="text-xl font-bold flex items-center gap-2">
-            <span className="text-blue-500">MiMi</span> RPG <span className="text-[10px] bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">LIVE</span>
-          </h2>
+        <div className="p-6 border-b border-slate-800 flex items-center gap-3">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+            <i className="fa-solid fa-gamepad text-white text-sm"></i>
+          </div>
+          <h2 className="text-xl font-black tracking-tight">MiMi RPG</h2>
         </div>
-        <nav className="flex-1 p-3 space-y-1">
-          <button onClick={() => setActiveTab('console')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition ${activeTab === 'console' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <i className="fa-solid fa-terminal text-sm"></i> Bot Console
+        <nav className="flex-1 p-3 space-y-2 mt-4">
+          <button onClick={() => setActiveTab('console')} className={`w-full flex items-center gap-4 px-5 py-3.5 rounded-2xl transition-all font-bold ${activeTab === 'console' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <i className="fa-solid fa-terminal text-sm"></i> Console
           </button>
-          <button onClick={() => setActiveTab('players')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition ${activeTab === 'players' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <i className="fa-solid fa-users text-sm"></i> Active Players
+          <button onClick={() => setActiveTab('players')} className={`w-full flex items-center gap-4 px-5 py-3.5 rounded-2xl transition-all font-bold ${activeTab === 'players' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <i className="fa-solid fa-users-viewfinder text-sm"></i> Players
           </button>
-          <button onClick={() => setActiveTab('database')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition ${activeTab === 'database' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <i className="fa-solid fa-database text-sm"></i> Export Data
+          <button onClick={() => setActiveTab('database')} className={`w-full flex items-center gap-4 px-5 py-3.5 rounded-2xl transition-all font-bold ${activeTab === 'database' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <i className="fa-solid fa-database text-sm"></i> Database
           </button>
         </nav>
-        <div className="p-4 bg-slate-800/30 m-3 rounded-2xl border border-slate-700/50">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="p-4 bg-slate-800/30 m-4 rounded-3xl border border-slate-800/60">
+          <div className="flex items-center gap-2 mb-3 px-1">
             <div className={`w-2 h-2 rounded-full ${isPolling ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-            <span className="text-xs font-bold uppercase tracking-wider">{isPolling ? 'Polling' : 'Idle'}</span>
+            <span className="text-[10px] font-black uppercase tracking-widest">{isPolling ? 'Server Online' : 'Server Down'}</span>
           </div>
-          <div className="text-[10px] text-slate-500 font-mono truncate">{token.split(':')[0]}:***</div>
-          <button onClick={() => window.location.reload()} className="mt-3 w-full text-[10px] bg-slate-700 hover:bg-slate-600 py-1.5 rounded-lg transition">Disconnect Bot</button>
+          <button onClick={() => window.location.reload()} className="w-full text-[10px] bg-red-500/10 hover:bg-red-500/20 text-red-500 font-black py-2.5 rounded-xl transition-all uppercase tracking-tighter border border-red-500/20">Stop Engine</button>
         </div>
       </div>
 
-      {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {activeTab === 'console' && (
           <div className="flex-1 flex flex-col p-6 overflow-hidden">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold flex items-center gap-2">
-                <i className="fa-solid fa-list-ul text-blue-500"></i> Server Activity Logs
-              </h3>
-              <span className="text-xs text-slate-500">Showing last 100 events</span>
+            <div className="flex justify-between items-center mb-6">
+              <div className="flex items-center gap-3">
+                <h3 className="text-xl font-black">Live Logs</h3>
+                <span className="bg-slate-800 text-[10px] px-2 py-0.5 rounded font-bold text-slate-400">WS-STREAM</span>
+              </div>
+              <div className="flex gap-4">
+                 <div className="text-right">
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active Sessions</p>
+                    <p className="text-sm font-black text-blue-400">{Object.keys(players).length} Users</p>
+                 </div>
+              </div>
             </div>
-            <div className="flex-1 bg-black border border-slate-800 rounded-2xl p-4 font-mono text-xs overflow-y-auto space-y-2">
-              {logs.length === 0 && <div className="text-slate-700 italic">Waiting for incoming messages on Telegram...</div>}
+            <div className="flex-1 bg-black/40 border border-slate-800 rounded-3xl p-6 font-mono text-[11px] overflow-y-auto space-y-3 scrollbar-hide backdrop-blur-sm">
+              {logs.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center opacity-30">
+                  <i className="fa-solid fa-satellite-dish text-4xl mb-4"></i>
+                  <p className="text-sm">Menunggu aktivitas bot...</p>
+                </div>
+              )}
               {logs.map(log => (
-                <div key={log.id} className="flex gap-3 animate-in fade-in slide-in-from-left-2 duration-300">
-                  <span className="text-slate-600 shrink-0">[{log.time.toLocaleTimeString()}]</span>
-                  <span className={`shrink-0 font-bold ${log.type === 'in' ? 'text-green-500' : log.type === 'out' ? 'text-blue-400' : 'text-amber-500'}`}>
-                    {log.type === 'in' ? '⬅ RECV' : log.type === 'out' ? '➡ SEND' : '⚡ SYS'}
+                <div key={log.id} className="flex gap-4 group animate-in slide-in-from-left-2 duration-300">
+                  <span className="text-slate-600 shrink-0 select-none">[{log.time.toLocaleTimeString()}]</span>
+                  <span className={`shrink-0 font-black w-10 text-center rounded px-1 ${log.type === 'in' ? 'bg-green-500/10 text-green-500' : log.type === 'out' ? 'bg-blue-500/10 text-blue-500' : 'bg-amber-500/10 text-amber-500'}`}>
+                    {log.type === 'in' ? 'RECV' : log.type === 'out' ? 'SEND' : 'SYST'}
                   </span>
-                  <span className="text-slate-400 shrink-0">@{log.user}:</span>
-                  <span className="text-slate-300 break-words">{log.text}</span>
+                  <div className="flex-1">
+                    <span className="text-slate-500 font-bold mr-2">@{log.user}:</span>
+                    <span className="text-slate-200 break-words whitespace-pre-wrap">{log.text}</span>
+                  </div>
                 </div>
               ))}
-            </div>
-            <div className="mt-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl text-xs text-blue-300 flex items-center gap-3">
-              <i className="fa-solid fa-circle-info text-base"></i>
-              <p>Bot is running! Open Telegram and search for your bot to start playing. Any command sent there will appear here in real-time.</p>
             </div>
           </div>
         )}
 
         {activeTab === 'players' && (
           <div className="p-8 overflow-y-auto">
-             <h2 className="text-2xl font-bold mb-6">User Database ({Object.keys(players).length} Players)</h2>
-             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-               {/* Fix: Cast Object.values to Player[] to avoid unknown type errors */}
+             <div className="flex items-center justify-between mb-8">
+               <h2 className="text-3xl font-black tracking-tight">Active Users</h2>
+               <div className="bg-blue-600/10 border border-blue-500/20 px-4 py-2 rounded-2xl flex items-center gap-3">
+                  <i className="fa-solid fa-database text-blue-500"></i>
+                  <span className="font-bold text-blue-400">{Object.keys(players).length} Total</span>
+               </div>
+             </div>
+             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                {(Object.values(players) as Player[]).map(p => (
-                 <div key={p.id} className="bg-slate-900 border border-slate-800 p-5 rounded-2xl hover:border-blue-500/50 transition-all group">
-                   <div className="flex justify-between items-start mb-3">
-                     <div>
-                       <h4 className="font-bold text-lg group-hover:text-blue-400 transition">{p.username}</h4>
-                       <span className="text-[10px] text-slate-500 uppercase font-mono">Chat ID: {p.id}</span>
-                     </div>
-                     <span className="bg-blue-600/20 text-blue-400 text-[10px] px-2 py-1 rounded-full font-bold">LV {p.level}</span>
+                 <div key={p.id} className="bg-slate-900/50 border border-slate-800 p-6 rounded-3xl hover:border-blue-500/40 transition-all hover:bg-slate-900 group">
+                   <div className="flex justify-between items-center mb-5">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-slate-800 rounded-xl flex items-center justify-center font-black group-hover:bg-blue-600 group-hover:text-white transition-all">
+                          {p.username.charAt(0)}
+                        </div>
+                        <h4 className="font-black text-lg">{p.username}</h4>
+                      </div>
+                      <span className="bg-blue-600/20 text-blue-400 text-[10px] px-3 py-1 rounded-full font-black uppercase tracking-tighter border border-blue-500/20">Lv {p.level}</span>
                    </div>
-                   <div className="grid grid-cols-2 gap-2 text-xs">
-                     <div className="bg-slate-800/50 p-2 rounded-lg">💰 {p.coins} Coins</div>
-                     <div className="bg-slate-800/50 p-2 rounded-lg">🏅 {p.rank}</div>
-                     <div className="bg-slate-800/50 p-2 rounded-lg col-span-2">⚔️ {p.equippedWeapon || 'No Weapon'}</div>
+                   <div className="space-y-3">
+                      <div className="flex justify-between items-center bg-slate-800/30 p-2.5 rounded-xl">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Coins</span>
+                        <span className="font-black text-sm text-amber-400">💰 {p.coins}</span>
+                      </div>
+                      <div className="flex justify-between items-center bg-slate-800/30 p-2.5 rounded-xl">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Rank</span>
+                        <span className="font-black text-xs text-blue-300">{p.rank}</span>
+                      </div>
+                      <div className="bg-slate-800/30 p-3 rounded-xl">
+                        <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Equipment</p>
+                        <p className="font-bold text-xs truncate text-slate-300">{p.equippedWeapon || 'Basic Hands'}</p>
+                      </div>
                    </div>
                  </div>
                ))}
-               {Object.keys(players).length === 0 && (
-                 <div className="col-span-full py-20 text-center text-slate-600 italic">No players registered yet. Message the bot to appear here.</div>
-               )}
              </div>
           </div>
         )}
 
         {activeTab === 'database' && (
           <div className="p-8 flex-1 flex flex-col overflow-hidden">
-            <h2 className="text-2xl font-bold mb-4">Master Database Export</h2>
-            <div className="flex-1 bg-slate-900 border border-slate-800 rounded-2xl p-6 overflow-hidden flex flex-col">
-              <div className="flex justify-between items-center mb-4">
-                 <p className="text-sm text-slate-400 italic">JSON format compatible with most analytics tools.</p>
+            <h2 className="text-3xl font-black mb-6 tracking-tight">System Database</h2>
+            <div className="flex-1 bg-slate-900/50 border border-slate-800 rounded-3xl p-8 overflow-hidden flex flex-col backdrop-blur-sm">
+              <div className="mb-4 flex justify-between items-center">
+                 <p className="text-sm font-bold text-slate-500">JSON PLAYER OBJECTS</p>
                  <button 
                   onClick={() => {
-                    navigator.clipboard.writeText(JSON.stringify(players, null, 2));
-                    alert("Database copied to clipboard!");
+                    navigator.clipboard.writeText(JSON.stringify(players));
+                    alert("Data pemain disalin!");
                   }}
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-sm font-bold transition flex items-center gap-2"
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-2xl font-black text-sm transition-all shadow-lg shadow-blue-900/40"
                  >
-                   <i className="fa-solid fa-copy"></i> Copy JSON
+                   COPY DATA
                  </button>
               </div>
               <textarea 
                 readOnly 
                 value={JSON.stringify(players, null, 2)} 
-                className="flex-1 bg-black text-blue-400 font-mono text-xs p-4 rounded-xl focus:outline-none resize-none border border-slate-800 scrollbar-hide"
+                className="flex-1 bg-black/40 text-blue-400 font-mono text-[10px] p-6 rounded-3xl focus:outline-none resize-none border border-slate-800 scrollbar-hide"
               />
             </div>
           </div>
