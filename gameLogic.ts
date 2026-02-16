@@ -103,6 +103,31 @@ export const rollGacha = (customRarity?: Rarity): Item => {
   return itemsOfRarity[Math.floor(Math.random() * itemsOfRarity.length)];
 };
 
+export const equipItem = (player: Player, itemName: string): string => {
+  const item = INITIAL_ITEMS.find(i => i.name === itemName);
+  if (!item) return "Item tidak ditemukan!";
+  
+  if (item.category === ItemCategory.WEAPON) {
+    player.equippedWeapon = item.name;
+    return `⚔️ ${item.name} berhasil dipasang!`;
+  } else if (item.category === ItemCategory.ARMOR) {
+    player.equippedArmor = item.name;
+    return `🛡️ ${item.name} berhasil dipasang!`;
+  } else if (item.category === ItemCategory.ACCESSORY) {
+    player.equippedAccessory = item.name;
+    return `💍 ${item.name} berhasil dipasang!`;
+  } else if (item.category === ItemCategory.POTION) {
+    if (item.heal) {
+      player.hp = Math.min(player.maxHp, player.hp + item.heal);
+      // Remove one potion from inventory
+      const index = player.inventory.indexOf(itemName);
+      if (index > -1) player.inventory.splice(index, 1);
+      return `🧪 Menggunakan ${item.name}! HP bertambah ${item.heal}.`;
+    }
+  }
+  return "Item tidak bisa digunakan!";
+};
+
 export const checkRandomEvent = (player: Player): string | null => {
   const rand = Math.random() * 100;
   
@@ -133,7 +158,6 @@ export const checkRandomEvent = (player: Player): string | null => {
       player.activePet = petData.nextForm;
       // Also update inventory of pets
       player.pets = player.pets.map(p => p === oldPet ? petData.nextForm : p);
-      const newPetData = PETS.find(p => p.name === player.activePet);
       return `🔥 Pet Evolusi! ${oldPet} → ${player.activePet} ⚔️ Damage meningkat!`;
     }
   } 
