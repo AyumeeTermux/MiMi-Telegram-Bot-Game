@@ -31,6 +31,14 @@ export interface Item {
   heal?: number;
   price: number;
   rarity: Rarity;
+  durationHours?: number; // In hours (0 = infinite)
+  maxUses?: number; // Number of uses (0 = infinite)
+}
+
+export interface ActiveItem {
+  name: string;
+  expiresAt?: number; // Timestamp
+  remainingUses?: number;
 }
 
 export interface Monster {
@@ -46,7 +54,7 @@ export interface Pet {
   name: string;
   damage: number;
   evolveLevel: number;
-  nextForm: string;
+  nextForm?: string;
 }
 
 export interface Dungeon {
@@ -56,13 +64,25 @@ export interface Dungeon {
   rewardXp: number;
 }
 
-export interface Guild {
+export interface GuildData {
   name: string;
-  leader: string;
   level: number;
   xp: number;
   coins: number;
-  members: string[];
+  territory: number;
+  warPoints: number;
+  currentRival?: string;
+  rivalHp: number;
+  maxRivalHp: number;
+  lastWarDate: string;
+}
+
+export interface EventData {
+  isActive: boolean;
+  theme: string;
+  startTime: string; // ISO string
+  endTime: string;   // ISO string
+  xpMultiplier: number;
 }
 
 export interface Player {
@@ -77,6 +97,7 @@ export interface Player {
   baseDamage: number;
   baseCrit: number;
   inventory: string[];
+  activeItems: ActiveItem[];
   equippedWeapon?: string;
   equippedArmor?: string;
   equippedAccessory?: string;
@@ -89,11 +110,16 @@ export interface Player {
   dailyDate: string;
   registerDate: string;
   dungeonsCleared: number;
+  warAttacks: number;
 }
 
-export interface GameMessage {
-  id: string;
-  sender: 'bot' | 'user';
-  text: string;
-  timestamp: Date;
+export interface GlobalState {
+  players: Record<string, Player>;
+  guilds: Record<string, GuildData>;
+  activeEvent?: EventData;
+  metadata: {
+    lastOffset: number;
+    serverStartTime: string;
+    totalCommandsProcessed: number;
+  };
 }
