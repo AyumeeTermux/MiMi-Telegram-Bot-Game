@@ -1,21 +1,24 @@
 {
-  "name": "mimi-games-rpg-by-owo-discord",
-  "private": true,
-  "version": "0.0.0",
+  "name": "mimi-rpg-browser-bot",
+  "version": "2.0.0",
+  "description": "Browser-based Telegram Bot Controller",
+  "main": "index.tsx",
   "type": "module",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vite": "^5.0.0",
+    "@vitejs/plugin-react": "^4.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
-  },
-  "devDependencies": {
-    "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "preview": "vite preview",
+    "start": "vite --host"
   }
 }

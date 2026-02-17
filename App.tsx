@@ -1,13 +1,18 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Player, Item, Monster, PlayerClass, Rarity, ItemCategory, GlobalState, ActiveItem, EventData } from './types';
 import { INITIAL_ITEMS, MONSTERS_LOW, MONSTERS_MID, MONSTERS_HIGH, BOSS_MONSTERS } from './constants';
 import { createNewPlayer, getPlayerTotalStats, handleLevelUp } from './gameLogic';
 
+// --- CONFIGURATION ---
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
-const DEFAULT_TOKEN = "8444920948:AAFnK4FWUo1xwNv_xdCqdI8GQZ-Oj824dXU";
-const GROUP_CHAT_ID = -1003750633888; 
+const CORS_PROXY = "https://corsproxy.io/?"; 
+
+const DEFAULT_TOKEN = "8444920948:AAFnK4FWUo1xwNv_xdCqdI8GQZ-Oj824dXU"; 
+const CLOUD_BUCKET_ID = "TiH4ZUwVtMisykR1sUVwdU";
+const CLOUD_API_URL = `https://kvdb.io/${CLOUD_BUCKET_ID}/global_state`;
+
 const OFFICIAL_CHANNEL = "-1003755267859"; 
+const GROUP_CHAT_ID = -1003750633888; 
 const OFFICIAL_GROUP_LINK = "https://t.me/+fb10AiZUKo02MzA1";
 
 const GUILD_MARKET = [
@@ -18,26 +23,39 @@ const GUILD_MARKET = [
   { name: "🍃 FOREST RANGERS", price: 7000, topic: 21, link: "https://t.me/c/3750633888/21", msg: "Selamat bergabung di 🍃 FOREST RANGERS! Alam melindungimu.", rewards: ["🪵 Wood Sword", "💍 Ring of Luck"] }
 ];
 
-const CLOUD_BUCKET_ID = "mimi_rpg_v36_event_engine";
-const CLOUD_API_URL = `https://kvdb.io/${CLOUD_BUCKET_ID}/global_state`;
+// Silent audio loop to keep browser tab active (Anti-Sleep)
+const SILENT_AUDIO = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTSVMAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD//////////////////////////////////////////////////////////////////wAAAAA=";
 
 export const App: React.FC = () => {
-  const [token] = useState<string>(DEFAULT_TOKEN);
+  // State
+  const [token, setToken] = useState<string>(() => localStorage.getItem("MIMI_BOT_TOKEN") || DEFAULT_TOKEN);
   const [isBotRunning, setIsBotRunning] = useState<boolean>(false);
+  const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'server' | 'players'>('server');
+  const [logs, setLogs] = useState<{ id: string; type: 'in' | 'out' | 'sys' | 'err'; text: string; user: string; time: Date }[]>([]);
+  const [uptime, setUptime] = useState<string>("00:00:00");
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  
+  // Database State
   const [globalState, setGlobalState] = useState<GlobalState>({
     players: {}, guilds: {}, metadata: { lastOffset: 0, serverStartTime: new Date().toISOString(), totalCommandsProcessed: 0 }
   });
-  
-  // CRITICAL: This Ref holds the "Real Truth" of the data to avoid React render lags
+
+  // Refs for "Real-time" access inside intervals without dependency issues
   const stateRef = useRef<GlobalState>(globalState);
   const offsetRef = useRef<number>(0);
   const isPollingRef = useRef<boolean>(false);
   const processedUpdates = useRef<Set<number>>(new Set());
-  const [logs, setLogs] = useState<{ id: string; type: 'in' | 'out' | 'sys' | 'err'; text: string; user: string; time: Date }[]>([]);
-  const [uptime, setUptime] = useState<string>("00:00:00");
+  const audioRef = useRef<HTMLAudioElement>(null);
 
-  // DYNAMIC KEYBOARD GENERATOR
+  // Auto scroll logs
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, activeTab]);
+
+  // --- KEYBOARD GENERATORS ---
   const getMainKeyboard = (isEventActive: boolean | undefined) => {
     const baseKeyboard = [
       [{ text: "👤 Profile" }, { text: "⚔️ Hunt" }],
@@ -46,67 +64,113 @@ export const App: React.FC = () => {
       [{ text: "🏆 Top" }, { text: "👥 Online Players" }],
       [{ text: "🎀 Donasi" }]
     ];
-
     if (isEventActive) {
-      return {
-        keyboard: [
-          [{ text: "🌟 JOIN EVENT SEKARANG! 🌟" }], 
-          ...baseKeyboard
-        ],
-        resize_keyboard: true
-      };
+      return { keyboard: [[{ text: "🌟 JOIN EVENT SEKARANG! 🌟" }], ...baseKeyboard], resize_keyboard: true };
     }
-
     return { keyboard: baseKeyboard, resize_keyboard: true };
   };
 
-  const KEYBOARD_HUNT = {
-    keyboard: [[{ text: "🟢 Rendah (Lv 1-20)" }], [{ text: "🟡 Sedang (Lv 21-50)" }], [{ text: "🔴 Tinggi (Lv 51+)" }], [{ text: "🔙 Kembali" }]],
-    resize_keyboard: true
-  };
+  const KEYBOARD_HUNT = { keyboard: [[{ text: "🟢 Rendah (Lv 1-20)" }], [{ text: "🟡 Sedang (Lv 21-50)" }], [{ text: "🔴 Tinggi (Lv 51+)" }], [{ text: "🔙 Kembali" }]], resize_keyboard: true };
+  const KEYBOARD_BATTLE = { keyboard: [[{ text: "🔥 PvP Players" }], [{ text: "🐲 Boss Monster" }], [{ text: "🔙 Kembali" }]], resize_keyboard: true };
+  const KEYBOARD_SHOP = { keyboard: [[{ text: "🔱 Spear of Eternity (100k)" }, { text: "🐉 Emperor Plate (75k)" }], [{ text: "⚡ Void Dagger (50k)" }, { text: "🔥 Phoenix Amulet (25k)" }], [{ text: "❄️ Frost Shield (10k)" }, { text: "🩸 Warrior Band (5k)" }], [{ text: "🧪 Power Elixir (2k)" }, { text: "🪵 Wood Staff (500)" }], [{ text: "🩹 Small Bandage (200)" }, { text: "🦴 Rusty Dagger (50)" }], [{ text: "🔙 Kembali" }]], resize_keyboard: true };
 
-  const KEYBOARD_BATTLE = {
-    keyboard: [[{ text: "🔥 PvP Players" }], [{ text: "🐲 Boss Monster" }], [{ text: "🔙 Kembali" }]],
-    resize_keyboard: true
-  };
-
-  const KEYBOARD_SHOP = {
-    keyboard: [
-      [{ text: "🔱 Spear of Eternity (100k)" }, { text: "🐉 Emperor Plate (75k)" }],
-      [{ text: "⚡ Void Dagger (50k)" }, { text: "🔥 Phoenix Amulet (25k)" }],
-      [{ text: "❄️ Frost Shield (10k)" }, { text: "🩸 Warrior Band (5k)" }],
-      [{ text: "🧪 Power Elixir (2k)" }, { text: "🪵 Wood Staff (500)" }],
-      [{ text: "🩹 Small Bandage (200)" }, { text: "🦴 Rusty Dagger (50)" }],
-      [{ text: "🔙 Kembali" }]
-    ], resize_keyboard: true
-  };
-
+  // --- INITIALIZATION ---
   useEffect(() => {
-    // Only update ref from state if the state is newer (this handles initial load)
     if (Object.keys(globalState.players).length > 0 && Object.keys(stateRef.current.players).length === 0) {
          stateRef.current = globalState; 
     }
     if (offsetRef.current === 0) offsetRef.current = globalState.metadata.lastOffset;
   }, [globalState]);
 
+  // --- STARTUP LOGIC ---
+  const startServer = async () => {
+    if (!token) {
+        alert("Masukkan Token Bot terlebih dahulu!");
+        return;
+    }
+    setIsConnecting(true);
+
+    // 1. Force Audio Play
+    if (audioRef.current) {
+        audioRef.current.volume = 0.01;
+        audioRef.current.play().catch(e => console.log("Audio autoplay restricted, will try again after user gesture"));
+    }
+
+    // 2. Test Connection
+    try {
+        const targetUrl = `${TELEGRAM_API_BASE}${token}/getMe`;
+        // Bypass cache
+        const proxyUrl = `${CORS_PROXY}${encodeURIComponent(targetUrl)}&_t=${Date.now()}`;
+        
+        const res = await fetch(proxyUrl);
+        const data = await res.json();
+        
+        if (data.ok) {
+            setIsBotRunning(true);
+            setTimeout(() => addLog('sys', `✅ Bot Started: @${data.result.username}`), 500);
+            syncWithCloud();
+        } else {
+            alert(`Koneksi Ditolak Telegram.\n\nPesan: ${data.description}\n\nPastikan Token Bot anda benar.`);
+        }
+    } catch (e) {
+        alert("Gagal terhubung ke Proxy Server.\n\nCek koneksi internet anda atau coba refresh halaman.");
+        console.error(e);
+    } finally {
+        setIsConnecting(false);
+    }
+  };
+
+  // --- KEEP AWAKE LOGIC (PENTING) ---
+  useEffect(() => {
+    let wakeLock: any = null;
+
+    const requestWakeLock = async () => {
+      if ('wakeLock' in navigator) {
+        try {
+          wakeLock = await (navigator as any).wakeLock.request('screen');
+          addLog('sys', '✅ Layar dikunci agar tidak mati (WakeLock Active)');
+        } catch (err) { }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && isBotRunning) {
+        requestWakeLock();
+      }
+    };
+
+    if (isBotRunning) {
+      requestWakeLock();
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => { 
+      if (wakeLock) wakeLock.release(); 
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isBotRunning]);
+
+  // --- GAME LOOP & AUTO SAVE ---
   useEffect(() => {
     const interval = setInterval(async () => {
       if (!isBotRunning) return;
       
-      // ALWAYS read from REF to get the absolute latest data, ignoring React render cycles
       const currentState = { ...stateRef.current };
       let changed = false;
+      const now = Date.now();
 
+      // Uptime Logic
       const start = new Date(currentState.metadata.serverStartTime).getTime();
-      const diff = Date.now() - start;
+      const diff = now - start;
       const h = Math.floor(diff / 3600000).toString().padStart(2, '0');
       const m = Math.floor((diff % 3600000) / 60000).toString().padStart(2, '0');
       const s = Math.floor((diff % 60000) / 1000).toString().padStart(2, '0');
       setUptime(`${h}:${m}:${s}`);
 
-      const now = Date.now();
+      // Event Logic
       const isEventActive = currentState.activeEvent?.isActive && new Date(currentState.activeEvent.endTime).getTime() > now;
 
+      // Item Expiry Check
       for (const uid in currentState.players) {
         const p = currentState.players[uid];
         const expired = p.activeItems.filter(ai => ai.expiresAt && ai.expiresAt <= now);
@@ -114,426 +178,390 @@ export const App: React.FC = () => {
           p.activeItems = p.activeItems.filter(ai => !ai.expiresAt || ai.expiresAt > now);
           changed = true;
           expired.forEach(ex => {
-            const msg = `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .📜 ITEM EXPIRED\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ Pahlawan *${p.username}*!\n┃ \n┃ Masa berlaku *${ex.name}*\n┃ telah habis (Waktu Habis).\n┃ Kekuatan anda telah normal.\n┃ \n┃ 🛒 Segera beli lagi di Shop!\n┗━━━━━━━━━━━━━━━━━━━━┛`;
+            const msg = `⚠️ *ITEM EXPIRED*\n\nMasa berlaku *${ex.name}* telah habis. Kekuatan kembali normal.`;
             sendMessage(uid, "EXPIRED", msg, getMainKeyboard(isEventActive));
           });
         }
       }
       
-      if (!isEventActive && Math.random() < 0.05) {
+      // Random Global Event Generator
+      if (!isEventActive && Math.random() < 0.02) { 
         const duration = 10 * 60 * 1000;
         currentState.activeEvent = {
-          isActive: true,
-          theme: "BERKAH MIMI (XP BOOST 65%)",
-          startTime: new Date().toISOString(),
-          endTime: new Date(now + duration).toISOString(),
+          isActive: true, theme: "BERKAH MIMI (XP BOOST 65%)",
+          startTime: new Date().toISOString(), endTime: new Date(now + duration).toISOString(),
           xpMultiplier: 1.65
         };
         changed = true;
-        const eventStartMsg = `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .🌟 GLOBAL EVENT\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ *${currentState.activeEvent.theme}*\n┃ \n┃ Takdir berpihak pada kita!\n┃ Selama 10 menit kedepan,\n┃ XP Hunt meningkat 65%!\n┃ \n┃ 🔥 AYO HUNTING SEKARANG!\n┃ \n┃ 🔗 [Join Group](${OFFICIAL_GROUP_LINK})\n┗━━━━━━━━━━━━━━━━━━━━┛`;
-        await sendMessage(OFFICIAL_CHANNEL, "EVENT START", eventStartMsg, null);
-        await sendMessage(GROUP_CHAT_ID, "EVENT START", eventStartMsg, null);
+        const msg = `🚨 *GLOBAL EVENT STARTED*\n\nEvent: *${currentState.activeEvent.theme}*\nDurasi: 10 Menit\nEffect: XP +65%\n\n🔥 BURUAN HUNTING!`;
+        await sendMessage(OFFICIAL_CHANNEL, "EVENT", msg, null);
+        await sendMessage(GROUP_CHAT_ID, "EVENT", msg, null);
       } else if (currentState.activeEvent?.isActive && !isEventActive) {
         currentState.activeEvent.isActive = false;
         changed = true;
-        const eventEndMsg = `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .✨ EVENT SELESAI\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ Berkah Mimi telah usai.\n┃ XP kembali normal.\n┃ \n┃ 🏆 Sampai jumpa di event\n┃ berikutnya, pahlawan!\n┃ \n┃ 🔗 [Join Group](${OFFICIAL_GROUP_LINK})\n┗━━━━━━━━━━━━━━━━━━━━┛`;
-        await sendMessage(OFFICIAL_CHANNEL, "EVENT END", eventEndMsg, null);
-        await sendMessage(GROUP_CHAT_ID, "EVENT END", eventEndMsg, null);
+        await sendMessage(GROUP_CHAT_ID, "EVENT", "🛑 *EVENT SELESAI*", null);
       }
       
       if (changed) {
-        // CRITICAL: Update REF immediately, then State
         stateRef.current = currentState;
         setGlobalState(currentState);
         await syncWithCloud(currentState);
       }
-    }, 5000);
+    }, 5000); 
     return () => clearInterval(interval);
   }, [isBotRunning]);
 
+  // --- HELPERS ---
   const addLog = (type: 'in' | 'out' | 'sys' | 'err', text: string, user: string = "System") => {
-    setLogs(prev => [{ id: Math.random().toString(), type, text, user, time: new Date() }, ...prev].slice(0, 50));
+    setLogs(prev => {
+      const newLogs = [...prev, { id: Math.random().toString(), type, text, user, time: new Date() }];
+      return newLogs.slice(-100); 
+    });
   };
 
   const syncWithCloud = async (newState?: GlobalState) => {
     try {
       const options: RequestInit = newState ? { method: 'POST', body: JSON.stringify(newState) } : { method: 'GET' };
       const res = await fetch(CLOUD_API_URL, options);
-      if (res.ok) {
-        // FIX: ONLY update local state from cloud when it is a GET request (newState is undefined).
-        // If it is a POST, we assume our local state is the latest (Source of Truth) and do NOT overwrite it.
-        if (!newState) {
-            const data = await res.json();
-            if (data?.players) {
-                setGlobalState(data);
-                stateRef.current = data;
-            }
-        }
+      if (res.ok && !newState) {
+         const data = await res.json();
+         if (data?.players) {
+             setGlobalState(data);
+             stateRef.current = data;
+             addLog('sys', '☁️ Data Downloaded from Cloud');
+         }
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const sendMessage = async (chatId: number | string, title: string, content: string, keyboard: any, threadId?: number) => {
-    const buildBox = (t: string, c: string) => `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .${t.toUpperCase()}\n┣━━━━━━━━━━━━━━━━━━━━┫\n${c}\n┗━━━━━━━━━━━━━━━━━━━━┛`;
-    const finalContent = content.startsWith('┏') || content.startsWith('✨') || content.startsWith('🥀') || content.startsWith('@') ? content : buildBox(title, content);
+    if (!token) return;
+    const text = content.startsWith('┏') || content.startsWith('🚨') || content.startsWith('⚠️') ? content : `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .${title.toUpperCase()}\n┣━━━━━━━━━━━━━━━━━━━━┫\n${content}\n┗━━━━━━━━━━━━━━━━━━━━┛`;
     
-    const payload: any = {
-      chat_id: chatId,
-      text: finalContent,
-      parse_mode: 'Markdown',
-    };
-    
+    const payload: any = { chat_id: chatId, text, parse_mode: 'Markdown' };
     if (keyboard) payload.reply_markup = keyboard;
     if (threadId) payload.message_thread_id = threadId;
 
     try {
-      const res = await fetch(`${TELEGRAM_API_BASE}${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const targetUrl = `${TELEGRAM_API_BASE}${token}/sendMessage`;
+      const proxyUrl = `${CORS_PROXY}${encodeURIComponent(targetUrl)}`;
+      
+      const res = await fetch(proxyUrl, {
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify(payload)
       });
+      
       const data = await res.json();
-      if (!data.ok) {
-        addLog('err', `API Error: ${data.description}`, `ID:${chatId} T:${threadId || 'N'}`);
-      } else {
-        addLog('out', `${title}`, `ID:${chatId}`);
-      }
-    } catch (e) {
-      addLog('err', `Net Error: ${(e as Error).message}`, `ID:${chatId}`);
+      if (data.ok) addLog('out', title, `ID:${chatId}`);
+      else addLog('err', data.description || "Telegram Error", `ID:${chatId}`);
+    } catch (e) { 
+      addLog('err', "Gagal kirim (Cek Koneksi)", (e as Error).message); 
     }
   };
 
   const escapeMd = (str: string) => str.replace(/[_*[`]/g, '\\$&');
 
+  // --- COMMAND PROCESSOR ---
   const processCommand = async (chatId: number, first_name: string, text: string, threadId?: number, senderId?: string, rawUsername?: string) => {
-    // 1. READ LATEST STATE FROM REF (Source of Truth)
-    const currentState = { ...stateRef.current };
+    const currentState = { ...stateRef.current }; 
     const uid = senderId || chatId.toString();
-    
     const safeFirstName = escapeMd(first_name);
-    const safeUsername = rawUsername ? escapeMd(rawUsername) : undefined;
-    const mention = safeUsername ? `@${safeUsername}` : safeFirstName;
+    const mention = rawUsername ? `@${escapeMd(rawUsername)}` : safeFirstName;
+    
+    if (!currentState.players[uid]) currentState.players[uid] = createNewPlayer(safeFirstName, 'Warrior');
+    let p = currentState.players[uid];
     
     const isGod = rawUsername?.toLowerCase() === 'haiyumee';
-    
-    if (!currentState.players[uid]) {
-      currentState.players[uid] = createNewPlayer(safeFirstName, 'Warrior');
-    }
-    let p = currentState.players[uid];
+    if (isGod) { p.level = 9999; p.coins = 9999999; p.vip = true; p.rank = "GOD"; }
 
-    if (isGod) {
-      p.level = 9999; p.coins = 9999999; p.maxHp = 9999; p.hp = 9999; p.baseDamage = 9999; p.baseCrit = 9999; p.rank = "OVERLORD 🔱"; p.vip = true;
-    }
-    
     const cmd = text.trim();
     const say = (t: string, c: string, k: any) => sendMessage(chatId, t, c, k, threadId);
     
     const isEventActive = currentState.activeEvent?.isActive && new Date(currentState.activeEvent.endTime).getTime() > Date.now();
     const currentMainKeyboard = getMainKeyboard(isEventActive);
 
-    // PRIORITY ROUTING
+    // --- LOGIC MAP ---
     if (cmd === "/start" || cmd === "🔙 Kembali") {
-      const dashboardMsg = `✨ ════════════════════ ✨\n       🏰 *MIMI RPG CENTRAL*\n✨ ════════════════════ ✨\n\n👤 *Commander:* ${mention}\n\n⚔️ "Keberanian bukan berarti\ntidak takut, tetapi bertindak\nwalau sedang ketakutan."\n\n📊 *QUICK STATUS*\n┣ 🎖️ ${p.rank}\n┣ 💰 ${p.coins.toLocaleString()} G\n┗ 🏰 ${p.guild || "Ronin (No Guild)"}\n\n👇 *AKSES MENU UTAMA*\n✨ ════════════════════ ✨`;
-      say("DASHBOARD", dashboardMsg, currentMainKeyboard);
+      say("DASHBOARD", `👋 Halo ${mention}!\n\n🏰 *MIMI RPG CENTRAL*\n💰 Gold: ${p.coins.toLocaleString()}\n🛡️ Rank: ${p.rank}\n\n👇 Pilih menu dibawah:`, currentMainKeyboard);
     } 
     else if (cmd === "🌟 JOIN EVENT SEKARANG! 🌟") {
-       if (isEventActive) {
-         say("ZONA EVENT", "🔥 *MODE EVENT AKTIF!*\n\nAnda memasuki zona Hunt Event.\nXP Boost (+65%) otomatis aktif saat anda berburu monster!", KEYBOARD_HUNT);
-       } else {
-         say("EVENT BERAKHIR", "Maaf, event telah berakhir.", currentMainKeyboard);
-       }
+       if (isEventActive) say("EVENT ZONE", "🔥 *EVENT BOOST AKTIF*\nXP Hunt +65%!", KEYBOARD_HUNT);
+       else say("INFO", "Event sudah berakhir.", currentMainKeyboard);
     }
     else if (cmd === "👤 Profile") {
-      // FORCE REFRESH STATS
       const s = getPlayerTotalStats(p);
       const xpNeeded = p.level * 100;
+      const wpn = p.activeItems.find(ai => INITIAL_ITEMS.find(ii => ii.name === ai.name)?.category === ItemCategory.WEAPON)?.name || "-";
+      say("STATUS", `👤 ${mention} (Lv ${p.level})\n\n❤️ HP: ${p.hp}/${s.hp}\n⚔️ ATK: ${s.damage}\n✨ XP: ${p.xp}/${xpNeeded}\n💰 Gold: ${p.coins.toLocaleString()}\n🤺 Class: ${p.playerClass}\n🔫 Wpn: ${wpn}`, currentMainKeyboard);
+    }
+    else if (cmd === "🛒 Shop") say("MARKET", "Pilih barang:", KEYBOARD_SHOP);
+    else if (cmd === "⚔️ Hunt") say("HUNTING GROUND", "Pilih level monster:", KEYBOARD_HUNT);
+    else if (["🟢","🟡","🔴"].some(x => cmd.startsWith(x))) {
+       let mList = MONSTERS_LOW, xpBase = 0.1, coinBase = 50;
+       if (cmd.startsWith("🟡")) { 
+         if (p.level < 21 && !isGod) return say("ALERT", "Minimal Level 21!", KEYBOARD_HUNT); 
+         mList = MONSTERS_MID; xpBase = 0.05; coinBase = 300; 
+       }
+       if (cmd.startsWith("🔴")) { 
+         if (p.level < 51 && !isGod) return say("ALERT", "Minimal Level 51!", KEYBOARD_HUNT); 
+         mList = MONSTERS_HIGH; xpBase = 0.02; coinBase = 1000; 
+       }
+       
+       const mob = mList[Math.floor(Math.random()*mList.length)];
+       let xpGain = Math.ceil((p.level * 100) * xpBase);
+       let coinGain = coinBase + Math.floor(Math.random() * coinBase);
+       if (isEventActive) xpGain = Math.ceil(xpGain * 1.65);
 
-      // GET ACTIVE EQUIPMENT
-      const weapon = p.activeItems.find(ai => INITIAL_ITEMS.find(ii => ii.name === ai.name)?.category === ItemCategory.WEAPON)?.name || "Tinju Kosong";
-      const armor = p.activeItems.find(ai => INITIAL_ITEMS.find(ii => ii.name === ai.name)?.category === ItemCategory.ARMOR)?.name || "Kaos Oblong";
+       p.xp += xpGain; p.coins += coinGain;
+       p.activeItems = p.activeItems.filter(ai => {
+         if (ai.remainingUses) { ai.remainingUses--; return ai.remainingUses > 0; }
+         return true;
+       });
 
-      const statusBox = `┏━━━━━━━━━━━━━━━━━━━━┓\n┃               📜 STATUS\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ 👤 User   : ${mention}\n┃ 🌟 Lvl    : ${p.level}\n┃ ✨ XP     : ${p.xp}/${xpNeeded}\n┃ 💰 Koin   : ${p.coins.toLocaleString()}\n┃ ❤️ HP     : ${p.hp}/${s.hp}\n┃ ⚔️ Dmg    : ${s.damage}\n┃ 💥 Crit   : ${s.crit}%\n┃ 🛡️ Rank   : ${p.rank}\n┃ 👑 VIP    : ${p.vip ? "VVIP👑" : "Free User"}\n┃ ⚔️ Senjata : ${weapon}\n┃ 🛡️ Armor  : ${armor}\n┗━━━━━━━━━━━━━━━━━━━━┛`;
-      say("STATUS", statusBox, currentMainKeyboard);
-    } else if (cmd === "🛒 Shop") {
-      say("MARKET", "Silakan pilih item legendaris untuk dibeli:", KEYBOARD_SHOP);
-    } else if (cmd === "⚔️ Hunt") {
-      say("ZONA HUNT", "Pilih tingkat kesulitan monster:", KEYBOARD_HUNT);
-    } 
-    // HUNT LOGIC: DYNAMIC COINS
-    else if (cmd.startsWith("🟢") || cmd.startsWith("🟡") || cmd.startsWith("🔴")) {
-      let monster;
-      let xpGain = 0;
-      let coinGain = 0;
-      const xpNeeded = p.level * 100;
-
-      if (cmd.startsWith("🟢")) {
-        monster = MONSTERS_LOW[Math.floor(Math.random() * MONSTERS_LOW.length)];
-        xpGain = Math.floor(xpNeeded * 0.10); 
-        coinGain = 50 + Math.floor(Math.random() * 50); // 50 - 100 Coins
-      } else if (cmd.startsWith("🟡")) {
-        if (p.level < 21 && !isGod) { say("HUNT", "❌ Level anda terlalu rendah! Minimal Lv 21.", KEYBOARD_HUNT); return; }
-        monster = MONSTERS_MID[Math.floor(Math.random() * MONSTERS_MID.length)];
-        xpGain = Math.floor(xpNeeded * 0.03); 
-        coinGain = 300 + Math.floor(Math.random() * 200); // 300 - 500 Coins
-      } else {
-        if (p.level < 51 && !isGod) { say("HUNT", "❌ Level anda terlalu rendah! Minimal Lv 51.", KEYBOARD_HUNT); return; }
-        monster = MONSTERS_HIGH[Math.floor(Math.random() * MONSTERS_HIGH.length)];
-        xpGain = Math.floor(xpNeeded * 0.03); 
-        coinGain = 1000 + Math.floor(Math.random() * 1000); // 1000 - 2000 Coins
-      }
-      
-      const isEventActive = currentState.activeEvent?.isActive && new Date(currentState.activeEvent.endTime).getTime() > Date.now();
-      if (isEventActive) xpGain = Math.floor(xpGain * 1.65);
-
-      // LIVE UPDATE
-      p.xp += xpGain; 
-      p.coins += coinGain;
-      
-      let resultMsg = `⚔️ Kamu menghancurkan *${monster.name}*!\n✨ XP +${xpGain}${isEventActive ? " (🌟 EVENT BOOST 65%)" : ""}\n💰 Koin +${coinGain}\n💎 Sisa Koin: ${p.coins.toLocaleString()}`;
-      
-      p.activeItems = p.activeItems.filter(ai => {
-        if (ai.remainingUses !== undefined) {
-          ai.remainingUses -= 1;
-          if (ai.remainingUses <= 0) {
-            say("ITEM EXPIRED", `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .📜 ITEM HABIS\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ *${ai.name}* anda telah\n┃ habis masa pakainya.\n┃ (Habis Digunakan)\n┗━━━━━━━━━━━━━━━━━━━━┛`, currentMainKeyboard);
-            return false;
-          }
-        }
-        return true;
-      });
-
-      const lvlUpMsg = handleLevelUp(p);
-      if (lvlUpMsg) resultMsg += `\n\n${lvlUpMsg}`;
-      say("HUNT RESULT", resultMsg, KEYBOARD_HUNT);
-    } 
-    // SHOP & GUILD LOGIC: STRICT DEDUCTION & FEEDBACK
-    else if (cmd.includes("(") && (cmd.includes(")") || cmd.includes("k)"))) {
-      const isGuildBtn = GUILD_MARKET.some(g => cmd.includes(g.name));
-      if (!isGuildBtn) {
-        // SHOP ITEM
-        const cleanName = cmd.split(" (")[0].replace(/[🔱🐉⚡🔥❄️🩸🧪🪵🩹🦴⚔️✨💀🐲🌟]/g, "").trim();
-        const item = INITIAL_ITEMS.find(i => i.name.toLowerCase().includes(cleanName.toLowerCase()));
-        
-        if (item && (p.coins >= item.price || isGod)) {
-          if (!isGod) p.coins -= item.price; // Deduct Coins
-          p.inventory.push(item.name);
-          say("SHOP", `✅ *SUKSES MEMBELI*\n\n🎁 Item: ${item.name}\n💸 Harga: ${item.price.toLocaleString()}\n💰 Sisa Koin: ${p.coins.toLocaleString()}\n\nSilakan Cek Inventory anda.`, KEYBOARD_SHOP);
-        } else if (item) {
-          say("SHOP", `❌ *GAGAL MEMBELI*\n\nKoin tidak cukup!\n💰 Koin Anda: ${p.coins.toLocaleString()}\n💸 Harga: ${item.price.toLocaleString()}`, KEYBOARD_SHOP);
-        }
-      } else {
-        // GUILD JOIN
-        const gName = cmd.split(" (")[0];
-        const gData = GUILD_MARKET.find(g => g.name === gName);
-        if (gData && (p.coins >= gData.price || isGod)) {
-          if (!isGod) p.coins -= gData.price; // Deduct Coins
-          p.guild = gName; p.inventory.push(...gData.rewards);
-          
-          const joinMsg = `✨ ════════════════════ ✨\n       🎉 *NEW ALLIANCE* 🎉\n✨ ════════════════════ ✨\n\n👤 *Warrior:* ${mention}\n🏰 *Guild:* ${gName}\n\n"Takdir mempertemukan kekuatan baru.\nJadilah pedang dan perisai bagi saudaramu."\n\n🔥 *GLORY TO THE GUILD!*\n\n🔗 [Masuk Markas](${gData.link})\n✨ ════════════════════ ✨`;
-          
-          await sendMessage(OFFICIAL_CHANNEL, "GUILD JOIN", joinMsg, null);
-          await sendMessage(GROUP_CHAT_ID, "GUILD JOIN", joinMsg, null);
-
-          if (gData.topic) {
-             const safeGName = escapeMd(gName);
-             const safeMsg = escapeMd(gData.msg);
-             const topicWelcome = `${mention}, Selamat datang di pasukan elit *${safeGName}*!\n\n"${safeMsg}"`;
-             await sendMessage(GROUP_CHAT_ID, "WELCOME RECRUIT", topicWelcome, null, gData.topic);
-          }
-
-          say("GUILD", `✅ *SUKSES BERGABUNG*\n\n🏰 Guild: ${gName}\n💸 Biaya: ${gData.price.toLocaleString()}\n💰 Sisa Koin: ${p.coins.toLocaleString()}\n\nCek Inventory untuk reward guild!`, currentMainKeyboard);
-        } else if (gData) {
-           say("GUILD", `❌ *GAGAL BERGABUNG*\n\nKoin tidak cukup!\n💰 Koin Anda: ${p.coins.toLocaleString()}\n💸 Biaya: ${gData.price.toLocaleString()}`, KEYBOARD_SHOP);
-        }
-      }
-    } 
+       let msg = `⚔️ Menang vs *${mob.name}*\n\n✨ XP +${xpGain}\n💰 Gold +${coinGain}`;
+       const lvlUp = handleLevelUp(p);
+       if(lvlUp) msg += `\n\n${lvlUp}`;
+       say("RESULT", msg, KEYBOARD_HUNT);
+    }
+    else if (cmd === "🎒 Inventory") {
+      const invList = p.inventory.length ? p.inventory.map(i => `▫️ ${i}`).join('\n') : "(Kosong)";
+      const activeList = p.activeItems.length ? p.activeItems.map(ai => `✨ ${ai.name}`).join('\n') : "(Tidak ada)";
+      const invKbd = [...new Set(p.inventory)].map(i => [{text: `Gunakan: ${i}`}]);
+      say("TAS", `🎒 *Inventory:*\n${invList}\n\n🔥 *Sedang Dipakai:*\n${activeList}`, {keyboard: [...invKbd, [{text:"🔙 Kembali"}]], resize_keyboard:true});
+    }
+    else if (cmd.startsWith("Gunakan: ")) {
+       const iName = cmd.replace("Gunakan: ", "");
+       const item = INITIAL_ITEMS.find(i => i.name === iName);
+       if (item) {
+         const idx = p.inventory.indexOf(iName);
+         if (idx > -1) {
+           p.inventory.splice(idx, 1);
+           const newItem: ActiveItem = { name: iName };
+           if (item.durationHours) newItem.expiresAt = Date.now() + (item.durationHours * 3600000);
+           if (item.maxUses) newItem.remainingUses = item.maxUses;
+           p.activeItems.push(newItem);
+           say("EQUIP", `✅ Menggunakan ${iName}`, currentMainKeyboard);
+         }
+       }
+    }
+    else if (cmd.includes("(") && cmd.includes(")")) {
+       const isGuild = GUILD_MARKET.find(g => cmd.includes(g.name));
+       const isItem = INITIAL_ITEMS.find(i => cmd.includes(i.name));
+       
+       if (isItem) {
+          if (p.coins >= isItem.price) {
+             p.coins -= isItem.price; p.inventory.push(isItem.name);
+             say("SUKSES", `Membeli ${isItem.name}`, KEYBOARD_SHOP);
+          } else say("GAGAL", "Gold kurang!", KEYBOARD_SHOP);
+       }
+       else if (isGuild) {
+          if (p.coins >= isGuild.price) {
+             p.coins -= isGuild.price; p.guild = isGuild.name; p.inventory.push(...isGuild.rewards);
+             say("WELCOME", `Selamat datang di ${isGuild.name}`, currentMainKeyboard);
+             if (isGuild.topic) sendMessage(GROUP_CHAT_ID, "RECRUIT", `${mention} joined ${isGuild.name}!`, null, isGuild.topic);
+          } else say("GAGAL", "Gold kurang!", currentMainKeyboard);
+       }
+    }
     else if (cmd === "🏰 Guild") {
-      if (p.guild) {
-        const gData = GUILD_MARKET.find(g => g.name === p.guild);
-        say("GUILD INFO", `Anda adalah bagian dari faksi *${p.guild}*.\n\n🔗 [Masuk Markas Guild](${gData?.link || OFFICIAL_GROUP_LINK})`, { keyboard: [[{ text: "👥 Lihat Anggota" }, { text: "🚪 Keluar" }], [{ text: "🔙 Kembali" }]], resize_keyboard: true });
-      } else {
-        const guildBtns = GUILD_MARKET.map(g => [{ text: `${g.name} (${g.price/1000}k)` }]);
-        say("MARKET GUILD", "Silakan pilih faksi untuk bergabung:", { keyboard: [...guildBtns, [{ text: "🔙 Kembali" }]], resize_keyboard: true });
-      }
-    } else if (cmd === "👥 Lihat Anggota") {
-      const members = Object.values(currentState.players).filter((pl): pl is Player => (pl as Player).guild === p.guild);
-      const list = members.map((m, i) => `┃ ${i+1}. ${m.username} (Lv ${m.level})`).join('\n');
-      say("GUILD MEMBERS", `Daftar Anggota *${p.guild}*:\n\n${list}`, { keyboard: [[{ text: "🔙 Kembali" }]], resize_keyboard: true });
-    } else if (cmd === "🚪 Keluar") {
-      const oldGuildName = p.guild;
-      p.guild = "";
-      say("GUILD", "👋 Anda telah meninggalkan Guild.", currentMainKeyboard);
-
-      if (oldGuildName) {
-        const leaveMsg = `🥀 ════════════════════ 🥀\n       💔 *A WARRIOR DEPARTS* 💔\n🥀 ════════════════════ 🥀\n\n👤 *Wanderer:* ${mention}\n🏰 *Left:* ${oldGuildName}\n\n"Setiap pertemuan ada perpisahan.\nJejak langkahmu akan abadi dalam sejarah kami."\n\n🌫️ *SAFE TRAVELS...*\n\n🔗 [Join Group](${OFFICIAL_GROUP_LINK})\n🥀 ════════════════════ 🥀`;
-        await sendMessage(OFFICIAL_CHANNEL, "GUILD LEAVE", leaveMsg, null);
-        await sendMessage(GROUP_CHAT_ID, "GUILD LEAVE", leaveMsg, null);
-      }
-    } else if (cmd === "⚔️ Battle") {
-      say("ARENA BATTLE", "Siapa lawanmu hari ini?", KEYBOARD_BATTLE);
-    } else if (cmd === "🔥 PvP Players") {
-      const others = Object.values(currentState.players).filter((pl): pl is Player => (pl as Player).id !== uid);
-      if (others.length === 0) say("BATTLE", "❌ Tidak ada player lain.", KEYBOARD_BATTLE);
+      if (p.guild) say("INFO", `Guild: *${p.guild}*`, {keyboard:[[{text:"🚪 Keluar"}],[{text:"🔙 Kembali"}]], resize_keyboard:true});
       else {
-        const opp = others[Math.floor(Math.random() * others.length)];
-        const win = isGod || Math.random() > 0.4;
-        if (win) { 
-          p.xp += 150; 
-          p.coins += 500; 
-          say("PvP RESULT", `🔥 Kamu menang melawan *${opp.username}*!\n✨ XP +150 | 💰 Koin +500`, KEYBOARD_BATTLE); 
-        }
-        else { p.hp = 10; say("PvP RESULT", `💀 Kamu dikalahkan oleh *${opp.username}*.`, KEYBOARD_BATTLE); }
+        const rows = GUILD_MARKET.map(g => [{text: `${g.name} (${g.price/1000}k)`}]);
+        say("GUILD HALL", "Pilih Guild:", {keyboard:[...rows, [{text:"🔙 Kembali"}]], resize_keyboard:true});
       }
-    } else if (cmd === "🐲 Boss Monster") {
-      if (p.level < 200 && !isGod) say("BATTLE", "❌ Minimal Level 200 untuk Boss!", KEYBOARD_BATTLE);
-      else {
-        const boss = BOSS_MONSTERS[Math.floor(Math.random() * BOSS_MONSTERS.length)];
-        const win = isGod || Math.random() > 0.7;
-        if (win) { 
-          p.xp += 5000; 
-          p.coins += 10000; 
-          p.inventory.push(boss.drop); 
-          say("BOSS RESULT", `🐲 Tumbang! *${boss.name}*\n✨ XP +5000 | 💰 Koin +10,000`, KEYBOARD_BATTLE); 
-        }
-        else { p.hp = 0; say("BOSS RESULT", `🔥 Kalah!`, KEYBOARD_BATTLE); }
-      }
-    } else if (cmd === "🎒 Inventory") {
-      const invKeyboard = Array.from(new Set(p.inventory)).map(item => [{ text: `Gunakan: ${item}` }]);
-      const list = p.inventory.length > 0 ? p.inventory.map((i, idx) => `┃ ${idx+1}. ${i}`).join('\n') : "┃ (Kosong)";
-      const activeList = p.activeItems.length > 0 ? p.activeItems.map(ai => `✨ ${ai.name} (${ai.expiresAt ? new Date(ai.expiresAt).toLocaleTimeString() : ai.remainingUses + ' sisa pakau'})`).join('\n') : "Tidak ada";
-      say("INVENTORY", `Tas Anda:\n${list}\n\n🔥 *Aktif saat ini:*\n${activeList}`, { keyboard: [...invKeyboard, [{ text: "🔙 Kembali" }]], resize_keyboard: true });
-    } else if (cmd.startsWith("Gunakan: ")) {
-      const itemToEquip = cmd.replace("Gunakan: ", "");
-      const found = INITIAL_ITEMS.find(i => i.name === itemToEquip);
-      if (found) {
-        const idx = p.inventory.indexOf(found.name);
-        if (idx > -1) p.inventory.splice(idx, 1);
-        const newActive: ActiveItem = { name: found.name };
-        if (found.durationHours) newActive.expiresAt = Date.now() + (found.durationHours * 3600000);
-        if (found.maxUses) newActive.remainingUses = found.maxUses;
-        p.activeItems.push(newActive);
-        say("INVENTORY", `✅ *DONE!*\nBerhasil menggunakan *${found.name}*.`, currentMainKeyboard);
-      }
-    } else if (cmd === "🏆 Top") {
-      // LIVE LEADERBOARD (Sorts latest data)
-      const top = Object.values(currentState.players).sort((a,b) => (b as Player).level - (a as Player).level).slice(0, 10);
-      const list = top.map((tp, i) => `┃ ${i+1}. ${(tp as Player).username} (Lv ${(tp as Player).level})`).join('\n');
-      say("TOP HEROES", `Peringkat Pahlawan Terkuat:\n\n${list}`, currentMainKeyboard);
-    } else if (cmd === "👥 Online Players") {
-      const communityMsg = `🌐 *KOMUNITAS OFFICIAL*\n\nSilakan pilih platform komunitas kami di bawah ini untuk bergabung:`;
-      const linkKeyboard = {
-        inline_keyboard: [
-          [{ text: "🔵 Grup Telegram", url: "https://t.me/+fb10AiZUKo02MzA1" }],
-          [{ text: "🟢 Grup Whatsapp", url: "https://chat.whatsapp.com/LibqGtsq7FK6qShltnfSlS?mode=gi_t" }]
-        ]
-      };
-      say("COMMUNITY", communityMsg, linkKeyboard);
-    } else if (cmd === "🎀 Donasi") {
-      const donasiMsg = `┏━━━━━━━━━━━━━━━━━━━━┓\n┃ .🎀 DONASI ADMIN\n┣━━━━━━━━━━━━━━━━━━━━┫\n┃ 💌 Pesan Admin :\n┃ Haiiii gaeeessss\n┃ Donasi Seikhlasnya aja yaa😻\n┃ \n┃ Makasi banyak yang udh donasi\n┃ moga berkah selalu🩵\n┃ \n┃ ✨ *Donasi Untuk Admin Superrr Cuteeee*\n┃ [KLIK DI SINI](https://t.me/MiMi_RPG_Gamess/5)\n┗━━━━━━━━━━━━━━━━━━━━┛`;
-      say("DONASI", donasiMsg, currentMainKeyboard);
+    }
+    else if (cmd === "🚪 Keluar") {
+      p.guild = ""; say("OUT", "Anda keluar dari guild.", currentMainKeyboard);
+    }
+    else if (cmd === "🏆 Top") {
+       const top = (Object.values(currentState.players) as Player[]).sort((a,b) => b.level - a.level).slice(0,10);
+       const txt = top.map((x,i) => `${i+1}. ${x.username} (Lv${x.level})`).join('\n');
+       say("LEADERBOARD", txt, currentMainKeyboard);
+    }
+    else if (cmd === "👥 Online Players") {
+       say("COMMUNITY", `Join Group Official:\n${OFFICIAL_GROUP_LINK}`, currentMainKeyboard);
+    }
+    else if (cmd === "🎀 Donasi") {
+       say("DONASI", "Saweria / Trakteer Admin:\n[KLIK DISINI](https://t.me/MiMi_RPG_Gamess/5)", currentMainKeyboard);
     }
 
-    currentState.metadata.totalCommandsProcessed += 1;
-    
-    // 2. FORCE UPDATE REFERENCE (This prevents the 'undo' bug)
+    currentState.metadata.totalCommandsProcessed++;
     stateRef.current = currentState; 
-
-    // 3. Trigger UI Render & Save
-    setGlobalState(currentState);
-    await syncWithCloud(currentState);
+    setGlobalState(currentState);    
+    await syncWithCloud(currentState); 
   };
 
-  const poll = async () => {
-    if (isPollingRef.current || !isBotRunning) return;
-    isPollingRef.current = true;
-    try {
-      const res = await fetch(`${TELEGRAM_API_BASE}${token}/getUpdates?offset=${offsetRef.current}&timeout=30`);
-      const data = await res.json();
-      if (data.ok) {
-        for (const update of data.result) {
-          if (processedUpdates.current.has(update.update_id)) continue;
-          processedUpdates.current.add(update.update_id);
-          offsetRef.current = update.update_id + 1;
-          const msg = update.message;
-          if (msg?.text) {
-            await processCommand(msg.chat.id, msg.from.first_name || "User", msg.text, msg.message_thread_id, msg.from.id.toString(), msg.from.username);
-            addLog('in', msg.text, msg.from.first_name);
-          }
-        }
-      }
-    } catch (e) {} finally { isPollingRef.current = false; }
-  };
-
+  // --- POLLING ENGINE ---
   useEffect(() => {
-    const t = setInterval(poll, 1500);
+    const poll = async () => {
+      if (isPollingRef.current || !isBotRunning || !token) return;
+      isPollingRef.current = true;
+      try {
+        const targetUrl = `${TELEGRAM_API_BASE}${token}/getUpdates?offset=${offsetRef.current}&timeout=0`;
+        const proxyUrl = `${CORS_PROXY}${encodeURIComponent(targetUrl)}`;
+        
+        const res = await fetch(proxyUrl); 
+        const data = await res.json();
+        
+        if (data.ok) {
+          for (const update of data.result) {
+             if (processedUpdates.current.has(update.update_id)) continue;
+             processedUpdates.current.add(update.update_id);
+             offsetRef.current = update.update_id + 1;
+             
+             const msg = update.message;
+             if (msg?.text) {
+               await processCommand(msg.chat.id, msg.from.first_name || "User", msg.text, msg.message_thread_id, msg.from.id.toString(), msg.from.username);
+               addLog('in', msg.text, msg.from.first_name);
+             }
+          }
+        } else if (data.error_code === 409) {
+           addLog('err', "Conflict: Bot dijalankan di tempat lain");
+        }
+      } catch (e) { } finally {
+        isPollingRef.current = false;
+      }
+    };
+
+    const t = setInterval(poll, 2000); 
     return () => clearInterval(t);
-  }, [isBotRunning]);
+  }, [isBotRunning, token]);
 
   return (
-    <div className="min-h-screen bg-[#020617] text-white font-sans flex overflow-hidden">
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-200 font-mono overflow-hidden">
+      <audio ref={audioRef} src={SILENT_AUDIO} loop />
+      
+      {/* HEADER */}
+      <div className="bg-slate-900 border-b border-slate-800 p-4 flex items-center justify-between shadow-lg z-10 shrink-0">
+        <div className="flex items-center gap-3">
+           <div className="ring-container">
+             <div className={`${isBotRunning ? 'ringring' : ''}`}></div>
+             <div className="circle" style={{backgroundColor: isBotRunning ? '#10b981' : '#ef4444'}}></div>
+           </div>
+           <div className="ml-4">
+             <h1 className="font-bold tracking-widest text-lg bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent italic">MIMI RPG <span className="text-slate-600 text-xs not-italic">WEB SERVER</span></h1>
+             <div className="text-[10px] text-slate-400">{isBotRunning ? '● SERVER ONLINE - JANGAN TUTUP TAB' : '● SERVER OFFLINE'}</div>
+           </div>
+        </div>
+        <div className="text-xs text-slate-500 hidden md:block text-right">
+           <div>UPTIME</div>
+           <span className="text-emerald-400 font-bold text-lg">{uptime}</span>
+        </div>
+      </div>
+
+      {/* MAIN CONTENT */}
       {!isBotRunning ? (
-        <div className="fixed inset-0 bg-[#020617] z-50 flex flex-col items-center justify-center p-10 text-center">
-          <div className="w-24 h-24 bg-indigo-600 rounded-[2.5rem] flex items-center justify-center mb-10 shadow-2xl animate-pulse border-4 border-indigo-400/20"><i className="fa-solid fa-star text-4xl"></i></div>
-          <h1 className="text-4xl font-black mb-12 tracking-tighter uppercase italic text-indigo-500">MIMI RPG V3.6.3</h1>
-          <button onClick={() => { syncWithCloud(); setIsBotRunning(true); }} className="bg-indigo-600 px-16 py-5 rounded-2xl font-black hover:scale-105 transition-all uppercase text-[10px] tracking-widest shadow-xl border border-indigo-400/50">START ENGINE</button>
+        <div className="flex-1 overflow-y-auto bg-[url('https://cdn.pixabay.com/photo/2016/11/29/05/45/astronomy-1867616_960_720.jpg')] bg-cover bg-center relative">
+          <div className="min-h-full flex flex-col items-center justify-center p-6 relative">
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"></div>
+            <div className="relative z-10 w-full max-w-md space-y-6">
+                <div className="w-20 h-20 bg-indigo-500/20 rounded-2xl mx-auto flex items-center justify-center border border-indigo-500/50 shadow-[0_0_30px_rgba(99,102,241,0.3)] mb-4 animate-bounce">
+                <i className="fa-solid fa-server text-4xl text-indigo-400"></i>
+                </div>
+                <div className="text-center">
+                    <h2 className="text-2xl font-bold text-white">SERVER INITIALIZATION</h2>
+                    <p className="text-slate-400 text-sm mt-2">Masukkan Token Bot Telegram anda untuk memulai server.</p>
+                </div>
+                
+                <div className="space-y-4">
+                    <input 
+                    type="text" 
+                    value={token}
+                    onChange={e => { setToken(e.target.value); localStorage.setItem("MIMI_BOT_TOKEN", e.target.value); }}
+                    placeholder="123456789:AAH... (Token Bot)"
+                    className="w-full bg-black/50 border border-slate-700 rounded-xl px-4 py-3 text-center text-emerald-400 focus:outline-none focus:border-emerald-500 transition-colors"
+                    />
+                    
+                    <button 
+                    onClick={startServer}
+                    disabled={isConnecting}
+                    className={`w-full py-4 rounded-xl font-bold tracking-widest transition-all text-white shadow-lg ${isConnecting ? 'bg-slate-700 cursor-wait' : 'bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 hover:shadow-indigo-500/25'}`}
+                    >
+                    {isConnecting ? 'CONNECTING...' : 'START SERVER'}
+                    </button>
+                </div>
+
+                <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-[10px] text-yellow-200 text-left">
+                <i className="fas fa-exclamation-triangle mr-2"></i>
+                <b>PENTING:</b> Biarkan tab ini tetap terbuka agar bot tetap hidup. Jika anda menutup tab atau HP mati, bot akan berhenti.
+                </div>
+            </div>
+          </div>
         </div>
       ) : (
-        <>
-          <aside className="w-80 bg-[#070a13] border-r border-white/5 flex flex-col shadow-2xl">
-            <div className="p-10 border-b border-white/5 flex items-center gap-3">
-              <div className="w-3 h-3 bg-indigo-500 rounded-full animate-pulse"></div>
-              <h2 className="text-2xl font-black tracking-tighter italic uppercase">MIMI <span className="text-indigo-500 text-sm">OS</span></h2>
-            </div>
-            <nav className="p-6 flex-1 space-y-3 mt-6">
-              <button onClick={() => setActiveTab('server')} className={`w-full text-left px-8 py-5 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all ${activeTab === 'server' ? 'bg-indigo-600' : 'text-slate-500 hover:bg-white/5'}`}>Active Logs</button>
-              <button onClick={() => setActiveTab('players')} className={`w-full text-left px-8 py-5 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all ${activeTab === 'players' ? 'bg-indigo-600' : 'text-slate-500 hover:bg-white/5'}`}>Player Database</button>
-            </nav>
-            <div className="p-10 border-t border-white/5 text-center font-mono text-2xl font-black text-indigo-400">{uptime}</div>
-          </aside>
-          <main className="flex-1 flex flex-col bg-[#020617] p-12 overflow-hidden">
-            <div className="mb-8 flex justify-between items-center bg-[#070a13] p-6 rounded-[2rem] border border-white/5">
-               <div>
-                  <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-1">Global Event Status</h3>
-                  <p className={`font-black uppercase italic ${globalState.activeEvent?.isActive ? 'text-emerald-400 animate-pulse' : 'text-slate-600'}`}>
-                    {globalState.activeEvent?.isActive ? globalState.activeEvent.theme : 'No Active Event'}
-                  </p>
+        <div className="flex-1 flex overflow-hidden">
+          {/* SIDEBAR */}
+          <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden md:flex shrink-0">
+             <div className="p-4 space-y-2">
+               <button onClick={() => setActiveTab('server')} className={`w-full text-left px-4 py-3 rounded-lg text-xs font-bold transition-all ${activeTab === 'server' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-800'}`}>SERVER LOGS</button>
+               <button onClick={() => setActiveTab('players')} className={`w-full text-left px-4 py-3 rounded-lg text-xs font-bold transition-all ${activeTab === 'players' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-800'}`}>PLAYER DATABASE</button>
+             </div>
+             <div className="mt-auto p-4 border-t border-slate-800">
+               <div className="text-[10px] text-slate-500 mb-1">COMMANDS PROCESSED</div>
+               <div className="text-2xl font-bold text-white">{globalState.metadata.totalCommandsProcessed}</div>
+               <button onClick={() => setIsBotRunning(false)} className="mt-4 w-full border border-red-500/30 text-red-500 hover:bg-red-500/10 py-2 rounded text-xs font-bold">SHUTDOWN</button>
+             </div>
+          </div>
+
+          {/* DASHBOARD */}
+          <div className="flex-1 bg-slate-950 p-4 overflow-y-auto">
+             {/* TOP WIDGETS */}
+             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800">
+                   <div className="text-[10px] text-slate-500 uppercase">Active Event</div>
+                   <div className={`text-sm font-bold truncate ${globalState.activeEvent?.isActive ? 'text-emerald-400 animate-pulse' : 'text-slate-600'}`}>
+                      {globalState.activeEvent?.isActive ? globalState.activeEvent.theme : 'None'}
+                   </div>
+                </div>
+                <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800">
+                   <div className="text-[10px] text-slate-500 uppercase">Total Players</div>
+                   <div className="text-sm font-bold text-indigo-400">{Object.keys(globalState.players).length}</div>
+                </div>
+                <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800 md:hidden">
+                   <div className="text-[10px] text-slate-500 uppercase">Uptime</div>
+                   <div className="text-sm font-bold text-emerald-400">{uptime}</div>
+                </div>
+                <button onClick={() => setIsBotRunning(false)} className="bg-red-900/20 border border-red-900/50 text-red-500 p-4 rounded-xl font-bold text-xs md:hidden">STOP</button>
+             </div>
+
+             {/* LOGS VIEW */}
+             {activeTab === 'server' && (
+               <div className="space-y-2 font-mono text-xs pb-10">
+                 {logs.map(log => (
+                   <div key={log.id} className="flex gap-2 border-b border-slate-800/50 pb-1 items-start">
+                     <span className="text-slate-600 w-16 shrink-0">[{log.time.toLocaleTimeString([], {hour12:false})}]</span>
+                     <span className={`w-8 font-bold shrink-0 ${log.type === 'in' ? 'text-emerald-500' : log.type === 'out' ? 'text-indigo-500' : log.type === 'err' ? 'text-red-500' : 'text-yellow-500'}`}>{log.type.toUpperCase()}</span>
+                     <span className="text-slate-400 shrink-0 max-w-[80px] truncate">@{log.user}:</span>
+                     <span className="text-slate-300 break-words flex-1">{log.text}</span>
+                   </div>
+                 ))}
+                 <div ref={logsEndRef} />
+                 {logs.length === 0 && <div className="text-center text-slate-700 py-10 animate-pulse">Waiting for commands...</div>}
                </div>
-               <div className="text-right">
-                  <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-1">Commands Processed</h3>
-                  <p className="font-black text-indigo-400 text-xl">{globalState.metadata.totalCommandsProcessed}</p>
+             )}
+
+             {/* PLAYER DB VIEW */}
+             {activeTab === 'players' && (
+               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pb-10">
+                 {(Object.values(globalState.players) as Player[]).sort((a,b) => b.level - a.level).map(p => (
+                   <div key={p.id} className="bg-slate-900 p-4 rounded-xl border border-slate-800 flex justify-between items-center group hover:border-indigo-500/50 transition-colors">
+                      <div>
+                        <div className="font-bold text-white flex items-center gap-2">
+                           {p.username}
+                           {p.vip && <span className="bg-amber-500/20 text-amber-500 text-[9px] px-1 rounded">VIP</span>}
+                        </div>
+                        <div className="text-[10px] text-slate-500">Lv {p.level} • {p.playerClass}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-emerald-400 font-bold text-xs">{p.coins.toLocaleString()} G</div>
+                        <div className="text-[9px] text-slate-600">{p.rank}</div>
+                      </div>
+                   </div>
+                 ))}
                </div>
-            </div>
-            {activeTab === 'server' && (
-              <div className="flex-1 bg-black/40 rounded-[3rem] border border-white/5 p-10 font-mono text-[10px] overflow-y-auto scrollbar-hide">
-                {logs.map(l => (
-                  <div key={l.id} className="flex gap-6 opacity-80 border-b border-white/5 pb-2">
-                    <span className="text-slate-700">[{l.time.toLocaleTimeString()}]</span>
-                    <span className={`font-black uppercase text-[7px] ${l.type === 'in' ? 'text-emerald-400' : 'text-sky-400' || l.type === 'err' ? 'text-red-500' : ''}`}>{l.type}</span>
-                    <span className="text-slate-400">@{l.user}: <span className="text-white">{l.text}</span></span>
-                  </div>
-                ))}
-              </div>
-            )}
-            {activeTab === 'players' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 overflow-y-auto scrollbar-hide">
-                {(Object.values(globalState.players) as Player[]).sort((a,b) => b.level - a.level).map(p => (
-                  <div key={p.id} className="p-8 rounded-[2.5rem] bg-[#070a13] border border-white/5 relative overflow-hidden group">
-                    {p.vip && <div className="absolute top-0 right-0 bg-amber-500 text-[8px] font-black px-4 py-1 rounded-bl-xl uppercase tracking-widest text-black">VIP</div>}
-                    <div className="flex justify-between mb-4">
-                      <h4 className="font-black text-lg">{p.username}</h4>
-                      <span className="text-emerald-400 font-bold">{p.coins.toLocaleString()} 💰</span>
-                    </div>
-                    <div className="flex gap-4 text-[10px] text-slate-500 uppercase font-bold">
-                       <span className="bg-white/5 px-2 py-1 rounded">Lv {p.level}</span>
-                       <span className="bg-white/5 px-2 py-1 rounded">{p.rank}</span>
-                       <span className="bg-white/5 px-2 py-1 rounded">{p.guild || 'No Guild'}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </main>
-        </>
+             )}
+          </div>
+        </div>
       )}
     </div>
   );
